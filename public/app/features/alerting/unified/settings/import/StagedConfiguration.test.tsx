@@ -1,8 +1,11 @@
 import { within } from '@testing-library/react';
+import { HttpResponse, http } from 'msw';
 import { render, screen } from 'test/test-utils';
 import { byRole, byText } from 'testing-library-selector';
 
 import { base64UrlEncode } from '@grafana/alerting';
+
+import { setupMswServer } from '../../mockApi';
 
 import { StagedConfiguration } from './StagedConfiguration';
 
@@ -53,6 +56,8 @@ receivers:
 `,
 };
 
+const server = setupMswServer();
+
 const ui = {
   heading: byRole('heading', { name: 'prometheus-prod' }),
   badge: byText(/staged · read-only/i),
@@ -61,11 +66,16 @@ const ui = {
   notificationPoliciesContent: byRole('region', { name: /notification polic/i }),
   expandAll: byRole('button', { name: /expand all/i }),
   parseError: byText(/couldn't read the staged configuration/i),
+  revertButton: byRole('button', { name: /^revert$/i }),
+  promoteButton: byRole('button', { name: /promote to live config/i }),
+  promoteModalTitle: byRole('heading', { name: /promote this configuration/i }),
+  revertModalTitle: byRole('heading', { name: /revert this staged configuration/i }),
+  noPermissionTooltip: byText(/don't have permission to modify/i),
 };
 
 describe('StagedConfiguration', () => {
   it('renders the identifier, staged badge and resource sections', () => {
-    render(<StagedConfiguration stagedConfig={stagedConfig} />);
+    render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
 
     expect(ui.heading.get()).toBeInTheDocument();
     expect(ui.badge.get()).toBeInTheDocument();
@@ -73,7 +83,7 @@ describe('StagedConfiguration', () => {
   });
 
   it('expands a section to reveal resource names', async () => {
-    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} />);
+    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
 
     await user.click(ui.contactPointsSection.get());
 
@@ -82,7 +92,7 @@ describe('StagedConfiguration', () => {
   });
 
   it('reveals every section when Expand all is clicked', async () => {
-    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} />);
+    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
 
     await user.click(ui.expandAll.get());
 
@@ -91,7 +101,7 @@ describe('StagedConfiguration', () => {
   });
 
   it('links each resource to its detail/list page', async () => {
-    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} />);
+    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
 
     await user.click(ui.expandAll.get());
 
@@ -127,6 +137,7 @@ describe('StagedConfiguration', () => {
     const { user } = render(
       <StagedConfiguration
         stagedConfig={stagedConfig}
+        canUpdate
         liveConfig={{ receivers: [{ name: 'default' }], time_intervals: [{ name: 'weekends', time_intervals: [] }] }}
       />
     );
@@ -148,7 +159,7 @@ describe('StagedConfiguration', () => {
   });
 
   it('shows inhibition rule details inline (no link)', async () => {
-    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} />);
+    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
 
     await user.click(ui.expandAll.get());
 
@@ -156,7 +167,7 @@ describe('StagedConfiguration', () => {
   });
 
   it('presents the import as a single routing tree named after the identifier', async () => {
-    const { user } = render(<StagedConfiguration stagedConfig={nestedPoliciesConfig} />);
+    const { user } = render(<StagedConfiguration stagedConfig={nestedPoliciesConfig} canUpdate />);
 
     // One import contributes one routing tree, so the section count is 1 regardless of the tree's size.
     expect(within(ui.notificationPoliciesSection.get()).getByText('1')).toBeInTheDocument();
@@ -171,7 +182,7 @@ describe('StagedConfiguration', () => {
   });
 
   it('does not label the imported root as the default policy', async () => {
-    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} />);
+    const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
 
     await user.click(ui.notificationPoliciesSection.get());
 
@@ -180,8 +191,46 @@ describe('StagedConfiguration', () => {
   });
 
   it('shows an error when the configuration cannot be parsed', () => {
-    render(<StagedConfiguration stagedConfig={{ identifier: 'broken', alertmanager_config: 'foo: [bar' }} />);
+    render(<StagedConfiguration stagedConfig={{ identifier: 'broken', alertmanager_config: 'foo: [bar' }} canUpdate />);
 
     expect(ui.parseError.get()).toBeInTheDocument();
+  });
+
+  describe('promote/revert actions', () => {
+    it('enables the actions when the user can update', () => {
+      render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
+
+      expect(ui.revertButton.get()).toBeEnabled();
+      expect(ui.promoteButton.get()).toBeEnabled();
+    });
+
+    it('disables the actions with an explanatory tooltip when the user cannot update', async () => {
+      const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate={false} />);
+
+      // Buttons with a tooltip render aria-disabled (wrapped so the tooltip still shows on hover)
+      // rather than the native disabled attribute.
+      expect(ui.revertButton.get()).toHaveAttribute('aria-disabled', 'true');
+      expect(ui.promoteButton.get()).toHaveAttribute('aria-disabled', 'true');
+
+      await user.hover(ui.promoteButton.get());
+      expect(await ui.noPermissionTooltip.find()).toBeInTheDocument();
+    });
+
+    it('opens the promote modal from the header action', async () => {
+      server.use(http.post('/api/convert/api/v1/alerts', () => HttpResponse.json({ status: 'success' })));
+      const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
+
+      await user.click(ui.promoteButton.get());
+
+      expect(await ui.promoteModalTitle.find()).toBeInTheDocument();
+    });
+
+    it('opens the revert modal from the header action', async () => {
+      const { user } = render(<StagedConfiguration stagedConfig={stagedConfig} canUpdate />);
+
+      await user.click(ui.revertButton.get());
+
+      expect(await ui.revertModalTitle.find()).toBeInTheDocument();
+    });
   });
 });

@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type * as React from 'react';
-import { useLocalStorage } from 'react-use';
+import { useAsync, useLocalStorage } from 'react-use';
 import { type Observable } from 'rxjs';
 
 import { type DataSourceInstanceSettings, type DataSourceRef, type ScopedVars } from '@grafana/data';
-import { type GetDataSourceListFilters, getDataSourceSrv } from '@grafana/runtime';
+import { getDataSourceSrv } from '@grafana/runtime';
+import {
+  type GetDataSourceInstanceListFilters,
+  getDataSourceInstanceList,
+  getDataSourceInstanceSettings,
+} from '@grafana/runtime/unstable';
 
 const LOCAL_STORAGE_KEY = 'grafana.features.datasources.components.picker.DataSourceDropDown.history';
 
@@ -42,14 +47,31 @@ export function useRecentlyUsedDataSources(): [string[], (ds: DataSourceInstance
   return [value, pushRecentlyUsedDataSource];
 }
 
-export function useDatasources(filters: GetDataSourceListFilters, datasources?: DataSourceInstanceSettings[]) {
-  if (datasources) {
-    return datasources;
-  }
-  const dataSourceSrv = getDataSourceSrv();
-  const dataSources = dataSourceSrv.getList(filters);
+export function useDatasources(
+  filters: GetDataSourceInstanceListFilters,
+  datasources?: DataSourceInstanceSettings[]
+): DataSourceInstanceSettings[] {
+  // Filters take part in the deps by value (the filter callback by reference) so
+  // inline objects don't re-trigger the lookup.
+  const { filter: filterFunc, ...serializableFilters } = filters;
+  const filtersKey = JSON.stringify(serializableFilters);
 
-  return dataSources;
+  const { value } = useAsync(
+    async () => {
+      if (datasources) {
+        return datasources;
+      }
+      const items = await getDataSourceInstanceList(filters);
+      // Consumers expose full DataSourceInstanceSettings via their public props, so resolve
+      // the slim list items to full settings (served from the same in-memory cache).
+      const settings = await Promise.all(items.map((item) => getDataSourceInstanceSettings(item.uid)));
+      return settings.filter((s) => s !== undefined);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtersKey, filterFunc, datasources]
+  );
+
+  return datasources ?? value ?? [];
 }
 
 export function useDatasource(
